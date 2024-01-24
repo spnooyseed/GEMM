@@ -48,19 +48,20 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
   const int tid = tx * thread_num_y_per_block + ty;
 
   // shared memory , A_shared , B_shared
-  __shared__ float As[Block_Size_K][Block_Size_N];
-  __shared__ float Bs[Block_Size_K][Block_Size_M];
+  __shared__ float As[2][Block_Size_K][Block_Size_N];
+  __shared__ float Bs[2][Block_Size_K][Block_Size_M];
   // register for C
   float accum[Thread_Size_X][Thread_Size_Y] = {0};
   // register for A , B
-  float reg_a[Thread_Size_X], reg_b[Thread_Size_Y];
+  float reg_a[2][Thread_Size_X], reg_b[2][Thread_Size_Y];
 
   const int load_num = 4;
   // resgister for load global memory
   const int load_num_A =
       Block_Size_N * Block_Size_K / (thread_num_per_block * load_num);
-
-  float load_A_reg[load_num * load_num_A];
+  const int load_num_B =
+      Block_Size_M * Block_Size_K / (thread_num_per_block * load_num);
+  float load_A_reg[load_num * load_num_A], load_B_reg[load_num * load_num_B];
   // threads num in one row
   const int A_Tile_Thread_Per_Row = Block_Size_K / load_num,
             B_Tile_Thread_Per_Row = Block_Size_M / load_num;
@@ -74,58 +75,130 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
 
   A = &A[Block_Size_N * bx * K];
   B = &B[Block_Size_M * by];
+
+  // load A、B from global to shared memory
+  for (int j = 0; j < Block_Size_N; j += A_Tile_Row_Stride) {
+    int load_index = j / A_Tile_Row_Stride * load_num;
+    Fetch_Float4(load_A_reg[load_index]) =
+        Fetch_Float4(A[Offset(A_Tile_Row + j, A_Tile_Col, K)]);
 #pragma unroll
-  for (int i = 0; i < K; i += Block_Size_K) {
+    for (int loadN = 0; loadN < load_num; ++loadN) {
+      As[0][A_Tile_Col + loadN][A_Tile_Row + j] =
+          load_A_reg[load_index + loadN];
+    }
+  }
 #pragma unroll
-    // load A、B from global to shared memory
-    for (int j = 0; j < Block_Size_N; j += A_Tile_Row_Stride) {
-      int load_index = j / A_Tile_Row_Stride * load_num;
-      Fetch_Float4(load_A_reg[load_index]) =
-          Fetch_Float4(A[Offset(A_Tile_Row + j, A_Tile_Col + i, K)]);
+  for (int j = 0; j < Block_Size_K; j += B_Tile_Row_Stride) {
+    Fetch_Float4(Bs[0][B_Tile_Row + j][B_Tile_Col]) =
+        Fetch_Float4(B[Offset(B_Tile_Row + j, B_Tile_Col, M)]);
+  }
+  __syncthreads();
+
 #pragma unroll
-      for (int loadN = 0; loadN < 4; ++loadN) {
-        As[A_Tile_Col + loadN][A_Tile_Row + j] = load_A_reg[load_index + loadN];
+  for (int thread_x = 0; thread_x < Thread_Size_X; thread_x += load_num) {
+    Fetch_Float4(reg_a[0][thread_x]) =
+        Fetch_Float4(As[0][0][Thread_Size_X * tx + thread_x]);
+  }
+#pragma unroll
+  for (int thread_y = 0; thread_y < Thread_Size_Y; thread_y += load_num) {
+    Fetch_Float4(reg_b[0][thread_y]) =
+        Fetch_Float4(Bs[0][0][Thread_Size_Y * ty + thread_y]);
+  }
+
+  int write_stage_idx = 1;
+// begin block iter
+#pragma unroll
+  for (int i = 0; i < K;) {
+    i += Block_Size_K;
+    if (i < K) {
+#pragma unroll
+      // load A、B from global to shared memory
+      for (int j = 0; j < Block_Size_N; j += A_Tile_Row_Stride) {
+        int load_index = j / A_Tile_Row_Stride * load_num;
+        Fetch_Float4(load_A_reg[load_index]) =
+            Fetch_Float4(A[Offset(A_Tile_Row + j, A_Tile_Col + i, K)]);
+      }
+#pragma unroll
+      for (int j = 0; j < Block_Size_K; j += B_Tile_Row_Stride) {
+        int load_index = j / B_Tile_Row_Stride * load_num;
+        Fetch_Float4(load_B_reg[load_index]) =
+            Fetch_Float4(B[Offset(B_Tile_Row + i + j, B_Tile_Col, M)]);
       }
     }
-#pragma unroll
-    for (int j = 0; j < Block_Size_K; j += B_Tile_Row_Stride) {
-      Fetch_Float4(Bs[B_Tile_Row + j][B_Tile_Col]) =
-          Fetch_Float4(B[Offset(B_Tile_Row + i + j, B_Tile_Col, M)]);
-    }
-    __syncthreads();
+    int load_stage_idx = write_stage_idx ^ 1;
+
 // load A、B from shared_memory to register
+// begin thread iter
 #pragma unroll
-    for (int j = 0; j < Block_Size_K; ++j) {
+    for (int j = 1; j < Block_Size_K; ++j) {
 #pragma unroll
       for (int thread_x = 0; thread_x < Thread_Size_X; thread_x += load_num) {
-        Fetch_Float4(reg_a[thread_x]) =
-            Fetch_Float4(As[j][Thread_Size_X * tx + thread_x]);
+        Fetch_Float4(reg_a[j % 2][thread_x]) =
+            Fetch_Float4(As[load_stage_idx][j][Thread_Size_X * tx + thread_x]);
       }
 #pragma unroll
       for (int thread_y = 0; thread_y < Thread_Size_Y; thread_y += load_num) {
-        Fetch_Float4(reg_b[thread_y]) =
-            Fetch_Float4(Bs[j][Thread_Size_Y * ty + thread_y]);
+        Fetch_Float4(reg_b[j % 2][thread_y]) =
+            Fetch_Float4(Bs[load_stage_idx][j][Thread_Size_Y * ty + thread_y]);
       }
 #pragma unroll
       for (int thread_x = 0; thread_x < Thread_Size_X; ++thread_x) {
 #pragma unroll
         for (int thread_y = 0; thread_y < Thread_Size_Y; ++thread_y) {
-          accum[thread_x][thread_y] += reg_a[thread_x] * reg_b[thread_y];
+          accum[thread_x][thread_y] +=
+              reg_a[(j - 1) % 2][thread_x] * reg_b[(j - 1) % 2][thread_y];
         }
       }
-    }
-#pragma unroll
-    for (int thread_x = 0; thread_x < Thread_Size_X; thread_x++) {
-#pragma unroll
-      for (int thread_y = 0; thread_y < Thread_Size_Y; thread_y += load_num) {
+    } // end thread iter
+    if (i < K) {
+      // load A、B from global to shared memory
+      for (int j = 0; j < Block_Size_N; j += A_Tile_Row_Stride) {
+        int load_index = j / A_Tile_Row_Stride * load_num;
 #pragma unroll
         for (int loadN = 0; loadN < load_num; ++loadN) {
-          Fetch_Float4(
-              C[Offset(Block_Size_N * bx + tx * Thread_Size_X + thread_x,
-                       Block_Size_M * by + ty * Thread_Size_Y + thread_y, M)]) =
-              Fetch_Float4(accum[thread_x][thread_y]);
+          As[write_stage_idx][A_Tile_Col + loadN][A_Tile_Row + j] =
+              load_A_reg[load_index + loadN];
         }
       }
+#pragma unroll
+      for (int j = 0; j < Block_Size_K; j += B_Tile_Row_Stride) {
+        int load_index = j / B_Tile_Row_Stride * load_num;
+        Fetch_Float4(Bs[write_stage_idx][B_Tile_Row + j][B_Tile_Col]) =
+            Fetch_Float4(load_B_reg[load_index]);
+      }
+      __syncthreads();
+      write_stage_idx ^= 1;
+    }
+
+#pragma unroll
+    for (int thread_x = 0; thread_x < Thread_Size_X; thread_x += load_num) {
+      Fetch_Float4(reg_a[0][thread_x]) = Fetch_Float4(
+          As[load_stage_idx ^ 1][0][Thread_Size_X * tx + thread_x]);
+    }
+#pragma unroll
+    for (int thread_y = 0; thread_y < Thread_Size_Y; thread_y += load_num) {
+      Fetch_Float4(reg_b[0][thread_y]) = Fetch_Float4(
+          Bs[load_stage_idx ^ 1][0][Thread_Size_Y * ty + thread_y]);
+    }
+    // comupte
+#pragma unroll
+    for (int thread_x = 0; thread_x < Thread_Size_X; ++thread_x) {
+#pragma unroll
+      for (int thread_y = 0; thread_y < Thread_Size_Y; ++thread_y) {
+        accum[thread_x][thread_y] += reg_a[1][thread_x] * reg_b[1][thread_y];
+      }
+    }
+  } // end block Iter
+
+  // rewrite to C global memory
+#pragma unroll
+  for (int thread_x = 0; thread_x < Thread_Size_X; thread_x++) {
+#pragma unroll
+    for (int thread_y = 0; thread_y < Thread_Size_Y; thread_y += load_num) {
+      Fetch_Float4(
+          C[Offset(Block_Size_N * bx + tx * Thread_Size_X + thread_x,
+                   Block_Size_M * by + ty * Thread_Size_Y + thread_y, M)]) =
+          Fetch_Float4(accum[thread_x][thread_y]);
     }
   }
 }
