@@ -59,10 +59,8 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
   // resgister for load global memory
   const int load_num_A =
       Block_Size_N * Block_Size_K / (thread_num_per_block * load_num);
-  const int load_num_B =
-      Block_Size_K * Block_Size_M / (thread_num_per_block * load_num);
 
-  float load_A_reg[load_num * load_num_A], load_B_reg[load_num * load_num_B];
+  float load_A_reg[load_num * load_num_A];
   // threads num in one row
   const int A_Tile_Thread_Per_Row = Block_Size_K / load_num,
             B_Tile_Thread_Per_Row = Block_Size_M / load_num;
@@ -82,23 +80,17 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
     // load A、B from global to shared memory
     for (int j = 0; j < Block_Size_N; j += A_Tile_Row_Stride) {
       int load_index = j / A_Tile_Row_Stride * load_num;
+      Fetch_Float4(load_A_reg[load_index]) =
+          Fetch_Float4(A[Offset(A_Tile_Row + j, A_Tile_Col + i, K)]);
 #pragma unroll
-      for (int loadN = 0; loadN < load_num; ++loadN) {
-        load_A_reg[load_index + loadN] =
-            A[Offset(A_Tile_Row + j, A_Tile_Col + i, K) + loadN];
-      }
-#pragma unroll
-      for (int loadN = 0; loadN < load_num; ++loadN) {
+      for (int loadN = 0; loadN < 4; ++loadN) {
         As[A_Tile_Col + loadN][A_Tile_Row + j] = load_A_reg[load_index + loadN];
       }
     }
 #pragma unroll
     for (int j = 0; j < Block_Size_K; j += B_Tile_Row_Stride) {
-#pragma unroll
-      for (int loadN = 0; loadN < load_num; ++loadN) {
-        Bs[B_Tile_Row + j][B_Tile_Col + loadN] =
-            B[Offset(B_Tile_Row + i + j, B_Tile_Col, M) + loadN];
-      }
+      Fetch_Float4(Bs[B_Tile_Row + j][B_Tile_Col]) =
+          Fetch_Float4(B[Offset(B_Tile_Row + i + j, B_Tile_Col, M)]);
     }
     __syncthreads();
 // load A、B from shared_memory to register
@@ -106,19 +98,13 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
     for (int j = 0; j < Block_Size_K; ++j) {
 #pragma unroll
       for (int thread_x = 0; thread_x < Thread_Size_X; thread_x += load_num) {
-#pragma unroll
-        for (int loadN = 0; loadN < load_num; ++loadN) {
-          reg_a[thread_x + loadN] =
-              As[j][Thread_Size_X * tx + thread_x + loadN];
-        }
+        Fetch_Float4(reg_a[thread_x]) =
+            Fetch_Float4(As[j][Thread_Size_X * tx + thread_x]);
       }
 #pragma unroll
       for (int thread_y = 0; thread_y < Thread_Size_Y; thread_y += load_num) {
-#pragma unroll
-        for (int loadN = 0; loadN < load_num; ++loadN) {
-          reg_b[thread_y + loadN] =
-              Bs[j][Thread_Size_Y * ty + thread_y + loadN];
-        }
+        Fetch_Float4(reg_b[thread_y]) =
+            Fetch_Float4(Bs[j][Thread_Size_Y * ty + thread_y]);
       }
 #pragma unroll
       for (int thread_x = 0; thread_x < Thread_Size_X; ++thread_x) {
@@ -134,10 +120,10 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
       for (int thread_y = 0; thread_y < Thread_Size_Y; thread_y += load_num) {
 #pragma unroll
         for (int loadN = 0; loadN < load_num; ++loadN) {
-
-          C[Offset(Block_Size_N * bx + tx * Thread_Size_X + thread_x,
-                   Block_Size_M * by + ty * Thread_Size_Y + thread_y, M) +
-            loadN] = accum[thread_x][thread_y + loadN];
+          Fetch_Float4(
+              C[Offset(Block_Size_N * bx + tx * Thread_Size_X + thread_x,
+                       Block_Size_M * by + ty * Thread_Size_Y + thread_y, M)]) =
+              Fetch_Float4(accum[thread_x][thread_y]);
         }
       }
     }
