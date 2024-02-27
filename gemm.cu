@@ -38,9 +38,16 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
   int tx = threadIdx.x, ty = threadIdx.y;
 
   int row = by * blockDim.y + ty, col = bx * blockDim.x + tx;
+  __shared__ float As[Block_Size_N][Block_Size_K];
+  __shared__ float Bs[Block_Size_K][Block_Size_M];
   float tmp = 0.0;
-  for (int i = 0; i < K; ++i) {
-    tmp += A[Offset(row, i, K)] * B[Offset(i, col, M)];
+  for (int i = 0; i < K; i += Block_Size_K) {
+    As[ty][tx] = A[Offset(row, tx + i, K)];
+    Bs[ty][tx] = B[Offset(ty + i, col, M)];
+    __syncthreads();
+    for (int j = 0; j < Block_Size_K; ++j) {
+      tmp += As[ty][j] * Bs[j][tx];
+    }
   }
   C[Offset(row, col, M)] = tmp;
 }
@@ -62,7 +69,7 @@ int main(int argc, char **argv) {
   checkCudaErrors(cudaMalloc(&d_b, sizeof(float) * M * K));
   checkCudaErrors(cudaMalloc(&d_c, sizeof(float) * N * M));
 
-  const int Block_Size_N = 32, Block_Size_M = 32, Block_Size_K = 8,
+  const int Block_Size_N = 32, Block_Size_M = 32, Block_Size_K = 32,
             Thread_Size_X = 8, Thread_Size_Y = 8;
   const bool Enable_Double_Buffer = false;
   // generate A
