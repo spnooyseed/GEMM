@@ -12,7 +12,8 @@
   {                                                                            \
     cudaError_t e = (func);                                                    \
     if (e != cudaSuccess)                                                      \
-      printf("%s %d CUDA: %s\n", __FILE__, __LINE__, cudaGetErrorString(e));   \
+      printf("golden_sgemm , %s %d CUDA: %s\n", __FILE__, __LINE__,            \
+             cudaGetErrorString(e));                                           \
   }
 
 // cal offset from row col and ld , in row-major matrix, ld is the width of the
@@ -240,7 +241,7 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
 
 int main(int argc, char **argv) {
   if (argc != 4) {
-    printf("usage: ./main [N] [K] [M]\n");
+    printf("golden_sgemm , usage: ./main [N] [K] [M]\n");
     exit(0);
   }
   size_t N = atoi(argv[1]);
@@ -313,9 +314,9 @@ int main(int argc, char **argv) {
   msecPerMatrixMul[0] = msecTotal / nIter;
   gigaFlops[0] =
       (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul[0] / 1000.0f);
-  printf(
-      "My gemm Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops,\n",
-      gigaFlops[0], msecPerMatrixMul[0], flopsPerMatrixMul);
+  printf("golden_sgemm , My gemm Performance= %.2f GFlop/s, Time= %.3f msec, "
+         "Size= %.0f Ops,\n",
+         gigaFlops[0], msecPerMatrixMul[0], flopsPerMatrixMul);
 
   // cublas
   cublasHandle_t blas_handle;
@@ -337,7 +338,8 @@ int main(int argc, char **argv) {
   msecPerMatrixMul[1] = msecTotal / nIter;
   gigaFlops[1] =
       (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul[1] / 1000.0f);
-  printf("CuBlas Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops,\n",
+  printf("golden_sgemm , CuBlas Performance= %.2f GFlop/s, Time= %.3f msec, "
+         "Size= %.0f Ops,\n",
          gigaFlops[1], msecPerMatrixMul[1], flopsPerMatrixMul);
 
   cublasDestroy(blas_handle);
@@ -352,15 +354,16 @@ int main(int argc, char **argv) {
     double abs_val = fabs(h_c[i]);
     double rel_err = abs_err / abs_val / dot_length;
     if (rel_err > eps) {
-      printf("Error! Matrix[%05d]=%.8f, ref=%.8f error term is > %E\n", i,
-             h_c[i], h_c1[col * N + row], eps);
+      printf("golden_sgemm , Error! Matrix[%05d]=%.8f, ref=%.8f error term is "
+             "> %E\n",
+             i, h_c[i], h_c1[col * N + row], eps);
       correct = false;
       break;
     }
   }
 
-  printf("%s\n", correct ? "Result= PASS" : "Result= FAIL");
-  printf("ratio= %f\n", gigaFlops[0] / gigaFlops[1]);
+  printf("golden_sgemm , %s\n", correct ? "Result= PASS" : "Result= FAIL");
+  printf("golden_sgemm , ratio= %f\n", gigaFlops[0] / gigaFlops[1]);
 
   // Free Memory
   cudaFree(d_a);

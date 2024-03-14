@@ -10,7 +10,8 @@
   {                                                                            \
     cudaError_t e = func;                                                      \
     if (e != cudaSuccess) {                                                    \
-      printf("%s , %d CUDA: %s\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
+      printf("gemm_v1_global_block , %s , %d CUDA: %s\n", __FILE__, __LINE__,  \
+             cudaGetErrorString(e));                                           \
     }                                                                          \
   }
 
@@ -42,19 +43,20 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
   __shared__ float Bs[Block_Size_K][Block_Size_M];
   float tmp = 0.0;
   for (int i = 0; i < K; i += Block_Size_K) {
+
     As[ty][tx] = A[Offset(row, tx + i, K)];
     Bs[ty][tx] = B[Offset(ty + i, col, M)];
     __syncthreads();
     for (int j = 0; j < Block_Size_K; ++j) {
+
       tmp += As[ty][j] * Bs[j][tx];
     }
   }
   C[Offset(row, col, M)] = tmp;
 }
-
 int main(int argc, char **argv) {
   if (argc != 4) {
-    printf("usage: ./main [N] [K] [M]");
+    printf("gemm_v1_global_block , usage: ./main [N] [K] [M]");
     exit(0);
   }
   size_t N = atoi(argv[1]), K = atoi(argv[2]), M = atoi(argv[3]);
@@ -143,9 +145,9 @@ int main(int argc, char **argv) {
   msecPerMatrixMul[0] = msecTotal / nIter;
   gigaFlops[0] =
       (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul[0] / 1000.0f);
-  printf(
-      "My gemm Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops,\n",
-      gigaFlops[0], msecPerMatrixMul[0], flopsPerMatrixMul);
+  printf("gemm_v1_global_block , My gemm Performance= %.2f GFlop/s, Time= %.3f "
+         "msec, Size= %.0f Ops,\n",
+         gigaFlops[0], msecPerMatrixMul[0], flopsPerMatrixMul);
 
   // cublas
   cublasHandle_t blas_handle;
@@ -175,7 +177,8 @@ int main(int argc, char **argv) {
   msecPerMatrixMul[1] = msecTotal / nIter;
   gigaFlops[1] =
       (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul[1] / 1000.0f);
-  printf("CuBlas Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops,\n",
+  printf("gemm_v1_global_block , CuBlas Performance= %.2f GFlop/s, Time= %.3f "
+         "msec, Size= %.0f Ops,\n",
          gigaFlops[1], msecPerMatrixMul[1], flopsPerMatrixMul);
 
   cublasDestroy(blas_handle);
@@ -190,15 +193,17 @@ int main(int argc, char **argv) {
     double abs_val = fabs(h_c[i]);
     double rel_err = abs_err / abs_val / dot_length;
     if (rel_err > eps) {
-      printf("Error! Matrix[%05d]=%.8f, ref=%.8f error term is > %E\n", i,
-             h_c[i], h_c1[col * N + row], eps);
+      printf("gemm_v1_global_block , Error! Matrix[%05d]=%.8f, ref=%.8f error "
+             "term is > %E\n",
+             i, h_c[i], h_c1[col * N + row], eps);
       correct = false;
       break;
     }
   }
 
-  printf("%s\n", correct ? "Result= PASS" : "Result= FAIL");
-  printf("ratio= %f\n", gigaFlops[0] / gigaFlops[1]);
+  printf("gemm_v1_global_block , %s\n",
+         correct ? "Result= PASS" : "Result= FAIL");
+  printf("gemm_v1_global_block , ratio= %f\n", gigaFlops[0] / gigaFlops[1]);
 
   delete h_a, h_b, h_c, h_c1;
   cudaFree(d_a);
