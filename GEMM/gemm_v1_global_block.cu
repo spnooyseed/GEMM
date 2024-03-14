@@ -51,6 +51,10 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
 
       tmp += As[ty][j] * Bs[j][tx];
     }
+    // must add __syncthreads, due to if fast SIMD warp finish compute As * Bs ,
+    // it will go to As[tx][ty] = A[...] , this lead to slow SIMD swrap get
+    // error data from As and Bs
+    __syncthreads();
   }
   C[Offset(row, col, M)] = tmp;
 }
