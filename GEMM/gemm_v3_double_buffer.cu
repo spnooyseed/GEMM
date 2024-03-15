@@ -10,7 +10,7 @@
   {                                                                            \
     cudaError_t e = func;                                                      \
     if (e != cudaSuccess) {                                                    \
-      printf("gemm_v2_shared_block , %s , %d CUDA: %s\n", __FILE__, __LINE__,  \
+      printf("gemm_v3_double_buffer , %s , %d CUDA: %s\n", __FILE__, __LINE__, \
              cudaGetErrorString(e));                                           \
     }                                                                          \
   }
@@ -38,26 +38,26 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
   // thread index
   int tx = threadIdx.x, ty = threadIdx.y;
 
-  __shared__ float As[Block_Size_K][Block_Size_N];
-  __shared__ float Bs[Block_Size_K][Block_Size_M];
+  __shared__ float As[2][Block_Size_K][Block_Size_N];
+  __shared__ float Bs[2][Block_Size_K][Block_Size_M];
   const int loadN = 4;
 
   A = &A[Offset(by * Block_Size_N, 0, K)];
   B = &B[Offset(0, bx * Block_Size_M, M)];
 
-  const int thread_num_x_per_block = Block_Size_N / Thread_Size_Y,
-            thread_num_y_per_block = Block_Size_M / Thread_Size_X;
+  const int thread_num_y_per_block = Block_Size_N / Thread_Size_Y,
+            thread_num_x_per_block = Block_Size_M / Thread_Size_X;
   const int thread_num_per_block =
       thread_num_x_per_block * thread_num_y_per_block;
   const int tid = ty * thread_num_x_per_block + tx;
 
   float accum[Thread_Size_Y][Thread_Size_X] = {0};
 
-  float reg_A[Thread_Size_Y], reg_B[Thread_Size_X];
+  float reg_A[2][Thread_Size_Y], reg_B[2][Thread_Size_X];
 
   const int load_num_A = Block_Size_N * Block_Size_K / thread_num_per_block;
-
-  float load_A_reg[load_num_A];
+  const int load_num_B = Block_Size_M * Block_Size_K / thread_num_per_block;
+  float load_A_reg[load_num_A], load_B_reg[load_num_B];
 
   const int A_Tile_Thread_Per_Row = Block_Size_K / loadN,
             B_Tile_Thread_Per_Row = Block_Size_M / loadN;
@@ -69,50 +69,117 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
   const int A_Tile_Row_Stride = thread_num_per_block / A_Tile_Thread_Per_Row,
             B_Tile_Row_Stride = thread_num_per_block / B_Tile_Thread_Per_Row;
 
+  // prefetch A data from global memory to shared memory
+  for (int tile_idx_bn = 0; tile_idx_bn < Block_Size_N;
+       tile_idx_bn += A_Tile_Row_Stride) {
+    int index = tile_idx_bn / A_Tile_Row_Stride * loadN;
+    Fetch_Float4(load_A_reg[index]) =
+        Fetch_Float4(A[Offset(A_Tile_Row + tile_idx_bn, A_Tile_Col, K)]);
+    for (int load_N = 0; load_N < loadN; ++load_N) {
+      As[0][A_Tile_Col + load_N][A_Tile_Row + tile_idx_bn] =
+          load_A_reg[index + load_N];
+    }
+  }
+
+  // prefetch B data from global memory to shared memory
+  for (int tile_idx_bk = 0; tile_idx_bk < Block_Size_K;
+       tile_idx_bk += B_Tile_Row_Stride) {
+    Fetch_Float4(Bs[0][B_Tile_Row + tile_idx_bk][B_Tile_Col]) =
+        Fetch_Float4(B[Offset(tile_idx_bk + B_Tile_Row, B_Tile_Col, M)]);
+  }
+  __syncthreads();
+
+  // prefetch data from shared memory rigster
+
+  for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y; tile_idx_rn += loadN) {
+    Fetch_Float4(reg_A[0][tile_idx_rn]) =
+        Fetch_Float4(As[0][0][Thread_Size_Y * ty + tile_idx_rn]);
+  }
+  // load B from shared to register
+  for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X; tile_idx_rm += loadN) {
+    Fetch_Float4(reg_B[0][tile_idx_rm]) =
+        Fetch_Float4(Bs[0][0][Thread_Size_X * tx + tile_idx_rm]);
+  }
+
+  int write_stage_idx = 1;
   for (int tile_idx_k = 0; tile_idx_k < K; tile_idx_k += Block_Size_K) {
-    // store transpose shared_memory matrix As from global memory
-    // load A from global to shared
-    for (int tile_idx_bn = 0; tile_idx_bn < Block_Size_N;
-         tile_idx_bn += A_Tile_Row_Stride) {
-      int index = tile_idx_bn / A_Tile_Row_Stride * loadN;
-      Fetch_Float4(load_A_reg[index]) = Fetch_Float4(
-          A[Offset(A_Tile_Row + tile_idx_bn, A_Tile_Col + tile_idx_k, K)]);
-      for (int load_N = 0; load_N < loadN; ++load_N) {
-        As[A_Tile_Col + load_N][A_Tile_Row + tile_idx_bn] =
-            load_A_reg[index + load_N];
+
+    // load next tile A and B from global to register tmp
+    if (tile_idx_k + Block_Size_K < K) {
+      for (int tile_idx_bn = 0; tile_idx_bn < Block_Size_N;
+           tile_idx_bn += A_Tile_Row_Stride) {
+        int index = tile_idx_bn / A_Tile_Row_Stride * loadN;
+        Fetch_Float4(load_A_reg[index]) =
+            Fetch_Float4(A[Offset(A_Tile_Row + tile_idx_bn,
+                                  A_Tile_Col + tile_idx_k + Block_Size_K, K)]);
+      }
+      // load B from global to shared
+      for (int tile_idx_bk = 0; tile_idx_bk < Block_Size_K;
+           tile_idx_bk += B_Tile_Row_Stride) {
+        int index = tile_idx_bk / B_Tile_Row_Stride * loadN;
+        Fetch_Float4(load_B_reg[index]) = Fetch_Float4(
+            B[Offset(tile_idx_k + Block_Size_K + tile_idx_bk + B_Tile_Row,
+                     B_Tile_Col, M)]);
       }
     }
-    // load B from global to shared
-    for (int tile_idx_bk = 0; tile_idx_bk < Block_Size_K;
-         tile_idx_bk += B_Tile_Row_Stride) {
-      Fetch_Float4(Bs[B_Tile_Row + tile_idx_bk][B_Tile_Col]) = Fetch_Float4(
-          B[Offset(tile_idx_k + tile_idx_bk + B_Tile_Row, B_Tile_Col, M)]);
-    }
-    __syncthreads();
+
+    int load_stage_idx = write_stage_idx ^ 1;
 #pragma unroll
     for (int tile_idx_bk = 0; tile_idx_bk < Block_Size_K; ++tile_idx_bk) {
-      // load A from shared to register
-      for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y;
-           tile_idx_rn += loadN) {
-        Fetch_Float4(reg_A[tile_idx_rn]) =
-            Fetch_Float4(As[tile_idx_bk][Thread_Size_Y * ty + tile_idx_rn]);
+
+      // prefetch next tile bk from As and Bs to register
+      if (tile_idx_bk + 1 < Block_Size_K) {
+        for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y;
+             tile_idx_rn += loadN) {
+          Fetch_Float4(reg_A[(tile_idx_bk + 1) % 2][tile_idx_rn]) =
+              Fetch_Float4(As[load_stage_idx][tile_idx_bk + 1]
+                             [Thread_Size_Y * ty + tile_idx_rn]);
+        }
+
+        for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X;
+             tile_idx_rm += loadN) {
+          Fetch_Float4(reg_B[(tile_idx_bk + 1) % 2][tile_idx_rm]) =
+              Fetch_Float4(Bs[load_stage_idx][tile_idx_bk + 1]
+                             [Thread_Size_X * tx + tile_idx_rm]);
+        }
       }
-      // load B from shared to register
-      for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X;
-           tile_idx_rm += loadN) {
-        Fetch_Float4(reg_B[tile_idx_rm]) =
-            Fetch_Float4(Bs[tile_idx_bk][Thread_Size_X * tx + tile_idx_rm]);
-      }
-      // compute accum(RN , RM) by (reg_A , reg_B)
+
+      // compute this tile rn , rm
       for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y; ++tile_idx_rn) {
         for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X; ++tile_idx_rm) {
           accum[tile_idx_rn][tile_idx_rm] +=
-              reg_A[tile_idx_rn] * reg_B[tile_idx_rm];
+              reg_A[tile_idx_bk % 2][tile_idx_rn] *
+              reg_B[tile_idx_bk % 2][tile_idx_rm];
         }
       }
     }
+
+    // load next tile A and B from register tmp to shared memory
+    if (tile_idx_k + Block_Size_K < K) {
+      for (int tile_idx_bn = 0; tile_idx_bn < Block_Size_N;
+           tile_idx_bn += A_Tile_Row_Stride) {
+        int index = tile_idx_bn / A_Tile_Row_Stride;
+        for (int load_N = 0; load_N < loadN; ++load_N) {
+          As[write_stage_idx][A_Tile_Col + load_N][A_Tile_Row + tile_idx_bn] =
+              load_A_reg[index + load_N];
+        }
+      }
+
+      // load B from global to shared
+      for (int tile_idx_bk = 0; tile_idx_bk < Block_Size_K;
+           tile_idx_bk += B_Tile_Row_Stride) {
+        int index = tile_idx_bk / B_Tile_Row_Stride * loadN;
+        for (int load_N = 0; load_N < loadN; ++load_N) {
+          Bs[write_stage_idx][B_Tile_Row + tile_idx_bk][B_Tile_Col + load_N] =
+              load_B_reg[index + load_N];
+        }
+      }
+    }
+
     __syncthreads();
+    write_stage_idx ^= 1;
   }
+
   // store back to C
   for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y; ++tile_idx_rn) {
     for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X;
@@ -127,7 +194,7 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
 
 int main(int argc, char **argv) {
   if (argc != 4) {
-    printf("gemm_v2_shared_block , usage: ./main [N] [K] [M]");
+    printf("gemm_v3_double_buffer , usage: ./main [N] [K] [M]");
     exit(0);
   }
   size_t N = atoi(argv[1]), K = atoi(argv[2]), M = atoi(argv[3]);
@@ -216,9 +283,10 @@ int main(int argc, char **argv) {
   msecPerMatrixMul[0] = msecTotal / nIter;
   gigaFlops[0] =
       (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul[0] / 1000.0f);
-  printf("gemm_v2_shared_block , My gemm Performance= %.2f GFlop/s, Time= %.3f "
-         "msec, Size= %.0f Ops,\n",
-         gigaFlops[0], msecPerMatrixMul[0], flopsPerMatrixMul);
+  printf(
+      "gemm_v3_double_buffer , My gemm Performance= %.2f GFlop/s, Time= %.3f "
+      "msec, Size= %.0f Ops,\n",
+      gigaFlops[0], msecPerMatrixMul[0], flopsPerMatrixMul);
 
   // cublas
   cublasHandle_t blas_handle;
@@ -248,7 +316,7 @@ int main(int argc, char **argv) {
   msecPerMatrixMul[1] = msecTotal / nIter;
   gigaFlops[1] =
       (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul[1] / 1000.0f);
-  printf("gemm_v2_shared_block , CuBlas Performance= %.2f GFlop/s, Time= %.3f "
+  printf("gemm_v3_double_buffer , CuBlas Performance= %.2f GFlop/s, Time= %.3f "
          "msec, Size= %.0f Ops,\n",
          gigaFlops[1], msecPerMatrixMul[1], flopsPerMatrixMul);
 
@@ -264,7 +332,7 @@ int main(int argc, char **argv) {
     double abs_val = fabs(h_c[i]);
     double rel_err = abs_err / abs_val / dot_length;
     if (rel_err > eps) {
-      printf("gemm_v2_shared_block , Error! Matrix[%05d]=%.8f, ref=%.8f error "
+      printf("gemm_v3_double_buffer , Error! Matrix[%05d]=%.8f, ref=%.8f error "
              "term is > %E\n",
              i, h_c[i], h_c1[col * N + row], eps);
       correct = false;
@@ -272,9 +340,9 @@ int main(int argc, char **argv) {
     }
   }
 
-  printf("gemm_v2_shared_block , %s\n",
+  printf("gemm_v3_double_buffer , %s\n",
          correct ? "Result= PASS" : "Result= FAIL");
-  printf("gemm_v2_shared_block , ratio= %f\n", gigaFlops[0] / gigaFlops[1]);
+  printf("gemm_v3_double_buffer , ratio= %f\n", gigaFlops[0] / gigaFlops[1]);
 
   delete h_a, h_b, h_c, h_c1;
   cudaFree(d_a);
