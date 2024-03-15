@@ -3,6 +3,11 @@
 ### how to use
 ```bash
 1. clang-format -i gemm.cu
-2. nvcc -std=c++11 -lcublas -o a gemm.cu
-3. ./a 2048 2048 2048
+
+// run one cuda kernel
+1. nvcc -std=c++11 -lcublas -o a gemm.cu
+2. ./a 2048 2048 2048
+
+// run all cuda kernel
+1. make
 ```

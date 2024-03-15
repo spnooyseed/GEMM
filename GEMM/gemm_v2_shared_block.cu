@@ -26,8 +26,8 @@ template <
 
     const int Block_Size_M,  /*width of block of C that each thread block
                                 calculate*/
-    const int Thread_Size_X, /*height of block of C that each thread calculate*/
-    const int Thread_Size_Y, /* width of block of C that each thread calculate*/
+    const int Thread_Size_Y, /*height of block of C that each thread calculate*/
+    const int Thread_Size_X, /* width of block of C that each thread calculate*/
     const bool double_buffer /*whether enable double buffering or not*/>
 
 __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
@@ -38,22 +38,96 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
   // thread index
   int tx = threadIdx.x, ty = threadIdx.y;
 
-  int row = by * blockDim.y + ty, col = bx * blockDim.x + tx;
-  __shared__ float As[Block_Size_N][Block_Size_K];
+  __shared__ float As[Block_Size_K][Block_Size_N];
   __shared__ float Bs[Block_Size_K][Block_Size_M];
-  float tmp = 0.0;
-  for (int i = 0; i < K; i += Block_Size_K) {
+  const int loadN = 4;
+
+  A = &A[Offset(by * Block_Size_N, 0, K)];
+  B = &B[Offset(0, bx * Block_Size_M, M)];
+
+  // const int thread_num_per_block =
+  //     Block_Size_N / Thread_Size_Y * (Block_Size_M / Thread_Size_X);
+  // const int tid = ty * blockDim.x + tx;
+  const int thread_num_x_per_block = Block_Size_N / Thread_Size_Y,
+            thread_num_y_per_block = Block_Size_M / Thread_Size_X;
+  const int thread_num_per_block =
+      thread_num_x_per_block * thread_num_y_per_block;
+  const int tid = ty * thread_num_x_per_block + tx;
+
+  float accum[Thread_Size_Y][Thread_Size_X] = {0};
+
+  float reg_A[Thread_Size_Y], reg_B[Thread_Size_X];
+
+  const int load_num_A = Block_Size_N * Block_Size_K / thread_num_per_block;
+
+  float load_A_reg[load_num_A];
+
+  const int A_Tile_Thread_Per_Row = Block_Size_K / loadN,
+            B_Tile_Thread_Per_Row = Block_Size_M / loadN;
+
+  const int A_Tile_Row = tid / A_Tile_Thread_Per_Row,
+            B_Tile_Row = tid / B_Tile_Thread_Per_Row;
+  const int A_Tile_Col = tid % A_Tile_Thread_Per_Row * loadN,
+            B_Tile_Col = tid % B_Tile_Thread_Per_Row * loadN;
+  const int A_Tile_Row_Stride = thread_num_per_block / A_Tile_Thread_Per_Row,
+            B_Tile_Row_Stride = thread_num_per_block / B_Tile_Thread_Per_Row;
+
+  for (int tile_idx_k = 0; tile_idx_k < K; tile_idx_k += Block_Size_K) {
     // store transpose shared_memory matrix As from global memory
-    As[tx][ty] = A[Offset(row, tx + i, K)];
-    Bs[ty][tx] = B[Offset(ty + i, col, M)];
+    // load A from global to shared
+    for (int tile_idx_bn = 0; tile_idx_bn < Block_Size_N;
+         tile_idx_bn += A_Tile_Row_Stride) {
+      int index = tile_idx_bn / A_Tile_Row_Stride * loadN;
+      Fetch_Float4(load_A_reg[index]) = Fetch_Float4(
+          A[Offset(A_Tile_Row + tile_idx_bn, A_Tile_Col + tile_idx_k, K)]);
+      for (int load_N = 0; load_N < loadN; ++load_N) {
+        As[A_Tile_Col + load_N][A_Tile_Row + tile_idx_bn] =
+            load_A_reg[index + load_N];
+      }
+    }
+    // load B from global to shared
+    for (int tile_idx_bk = 0; tile_idx_bk < Block_Size_K;
+         tile_idx_bk += B_Tile_Row_Stride) {
+      Fetch_Float4(Bs[B_Tile_Row + tile_idx_bk][B_Tile_Col]) = Fetch_Float4(
+          B[Offset(tile_idx_k + tile_idx_bk + B_Tile_Row, B_Tile_Col, M)]);
+    }
     __syncthreads();
-    for (int j = 0; j < Block_Size_K; ++j) {
-      // load transpose shared_memory matrix As
-      tmp += As[j][ty] * Bs[j][tx];
+
+    for (int tile_idx_bk = 0; tile_idx_bk < Block_Size_K; ++tile_idx_bk) {
+      // load A from shared to register
+      for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y;
+           tile_idx_rn += loadN) {
+        Fetch_Float4(reg_A[tile_idx_rn]) =
+            Fetch_Float4(As[tile_idx_bk][Thread_Size_Y * ty + tile_idx_rn]);
+      }
+      // load B from shared to register
+      for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X;
+           tile_idx_rm += loadN) {
+        Fetch_Float4(reg_B[tile_idx_rm]) =
+            Fetch_Float4(Bs[tile_idx_bk][Thread_Size_X * tx + tile_idx_rm]);
+      }
+      // compute accum(RN , RM) by (reg_A , reg_B)
+      for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y; ++tile_idx_rn) {
+        for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X; ++tile_idx_rm) {
+          accum[tile_idx_rn][tile_idx_rm] +=
+              reg_A[tile_idx_rn] * reg_B[tile_idx_rm];
+        }
+      }
+    }
+    __syncthreads();
+  }
+  // store back to C
+  for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y; ++tile_idx_rn) {
+    for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X;
+         tile_idx_rm += loadN) {
+      Fetch_Float4(
+          C[Offset(by * Block_Size_N + Thread_Size_Y * ty + tile_idx_rn,
+                   bx * Block_Size_M + Thread_Size_X * tx + tile_idx_rm, M)]) =
+          Fetch_Float4(accum[tile_idx_rn][tile_idx_rm]);
     }
   }
-  C[Offset(row, col, M)] = tmp;
 }
+
 int main(int argc, char **argv) {
   if (argc != 4) {
     printf("gemm_v2_shared_block , usage: ./main [N] [K] [M]");
@@ -71,7 +145,7 @@ int main(int argc, char **argv) {
   checkCudaErrors(cudaMalloc(&d_b, sizeof(float) * M * K));
   checkCudaErrors(cudaMalloc(&d_c, sizeof(float) * N * M));
 
-  const int Block_Size_N = 32, Block_Size_M = 32, Block_Size_K = 32,
+  const int Block_Size_N = 128, Block_Size_M = 128, Block_Size_K = 8,
             Thread_Size_X = 8, Thread_Size_Y = 8;
   const bool Enable_Double_Buffer = false;
   // generate A
@@ -95,11 +169,9 @@ int main(int argc, char **argv) {
   checkCudaErrors(cudaEventRecord(start));
 
   for (int run = 0; run < nIter; ++run) {
-    dim3 dimBlock(Block_Size_N, Block_Size_M);
-    // size_t block_num_x= N / Block_Size_N , block_num_y = M / Block_Size_M ;
+    dim3 dimBlock(Block_Size_N / Thread_Size_Y, Block_Size_M / Thread_Size_X);
     dim3 dimGrid(N / Block_Size_N, M / Block_Size_M);
-    // printf("Grid = (%d , %d)\n" , dimGrid.x , dimGrid.y) ;
-    Gemm<Block_Size_N, Block_Size_K, Block_Size_M, Thread_Size_X, Thread_Size_Y,
+    Gemm<Block_Size_N, Block_Size_K, Block_Size_M, Thread_Size_Y, Thread_Size_X,
          Enable_Double_Buffer><<<dimGrid, dimBlock>>>(d_a, d_b, d_c, N, M, K);
   }
 
