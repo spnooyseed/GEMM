@@ -11,3 +11,12 @@
 // run all cuda kernel
 1. make
 ```
+
+![GEMM](GEMM.jpg)
+
+
+### Referecnce
+1. https://zhuanlan.zhihu.com/p/435908830
+2. https://zhuanlan.zhihu.com/p/442930482
+3. https://zhuanlan.zhihu.com/p/481600052
+4. https://zhuanlan.zhihu.com/p/614109686

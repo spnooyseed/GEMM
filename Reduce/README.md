@@ -18,7 +18,7 @@
 clang-format -i file
 ```
 
-![reduce](reduce.png)
+![reduce](Reduce.jpg)
 ### References
 1. https://zhuanlan.zhihu.com/p/426978026
 2. https://zhuanlan.zhihu.com/p/596012674
