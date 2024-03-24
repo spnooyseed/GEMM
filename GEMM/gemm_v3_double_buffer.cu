@@ -68,33 +68,39 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
             B_Tile_Col = tid % B_Tile_Thread_Per_Row * loadN;
   const int A_Tile_Row_Stride = thread_num_per_block / A_Tile_Thread_Per_Row,
             B_Tile_Row_Stride = thread_num_per_block / B_Tile_Thread_Per_Row;
-
+#pragma unroll
   // prefetch A data from global memory to shared memory
   for (int tile_idx_bn = 0; tile_idx_bn < Block_Size_N;
        tile_idx_bn += A_Tile_Row_Stride) {
     int index = tile_idx_bn / A_Tile_Row_Stride * loadN;
     Fetch_Float4(load_A_reg[index]) =
-        Fetch_Float4(A[Offset(A_Tile_Row + tile_idx_bn, A_Tile_Col, K)]);
+        Fetch_Float4(A[Offset(A_Tile_Row + tile_idx_bn, // row
+                              A_Tile_Col,               // col
+                              K)]);
+#pragma unroll
     for (int load_N = 0; load_N < loadN; ++load_N) {
       As[0][A_Tile_Col + load_N][A_Tile_Row + tile_idx_bn] =
           load_A_reg[index + load_N];
     }
   }
-
+#pragma unroll
   // prefetch B data from global memory to shared memory
   for (int tile_idx_bk = 0; tile_idx_bk < Block_Size_K;
        tile_idx_bk += B_Tile_Row_Stride) {
     Fetch_Float4(Bs[0][B_Tile_Row + tile_idx_bk][B_Tile_Col]) =
-        Fetch_Float4(B[Offset(tile_idx_bk + B_Tile_Row, B_Tile_Col, M)]);
+        Fetch_Float4(B[Offset(tile_idx_bk + B_Tile_Row, // row
+                              B_Tile_Col,               // col
+                              M)]);
   }
   __syncthreads();
 
-  // prefetch data from shared memory rigster
-
+// prefetch data from shared memory rigster
+#pragma unroll
   for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y; tile_idx_rn += loadN) {
     Fetch_Float4(reg_A[0][tile_idx_rn]) =
         Fetch_Float4(As[0][0][Thread_Size_Y * ty + tile_idx_rn]);
   }
+#pragma unroll
   // load B from shared to register
   for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X; tile_idx_rm += loadN) {
     Fetch_Float4(reg_B[0][tile_idx_rm]) =
@@ -102,24 +108,29 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
   }
 
   int write_stage_idx = 1;
+#pragma unroll
   for (int tile_idx_k = 0; tile_idx_k < K; tile_idx_k += Block_Size_K) {
 
     // load next tile A and B from global to register tmp
     if (tile_idx_k + Block_Size_K < K) {
+#pragma unroll
       for (int tile_idx_bn = 0; tile_idx_bn < Block_Size_N;
            tile_idx_bn += A_Tile_Row_Stride) {
         int index = tile_idx_bn / A_Tile_Row_Stride * loadN;
         Fetch_Float4(load_A_reg[index]) =
-            Fetch_Float4(A[Offset(A_Tile_Row + tile_idx_bn,
-                                  A_Tile_Col + tile_idx_k + Block_Size_K, K)]);
+            Fetch_Float4(A[Offset(A_Tile_Row + tile_idx_bn,               // row
+                                  A_Tile_Col + tile_idx_k + Block_Size_K, // col
+                                  K)]);
       }
-      // load B from global to shared
+// load B from global to shared
+#pragma unroll
       for (int tile_idx_bk = 0; tile_idx_bk < Block_Size_K;
            tile_idx_bk += B_Tile_Row_Stride) {
         int index = tile_idx_bk / B_Tile_Row_Stride * loadN;
-        Fetch_Float4(load_B_reg[index]) = Fetch_Float4(
-            B[Offset(tile_idx_k + Block_Size_K + tile_idx_bk + B_Tile_Row,
-                     B_Tile_Col, M)]);
+        Fetch_Float4(load_B_reg[index]) = Fetch_Float4(B[Offset(
+            tile_idx_k + Block_Size_K + tile_idx_bk + B_Tile_Row, // row
+            B_Tile_Col,                                           // col
+            M)]);
       }
     }
 
@@ -129,13 +140,14 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
 
       // prefetch next tile bk from As and Bs to register
       if (tile_idx_bk + 1 < Block_Size_K) {
+#pragma unroll
         for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y;
              tile_idx_rn += loadN) {
           Fetch_Float4(reg_A[(tile_idx_bk + 1) % 2][tile_idx_rn]) =
               Fetch_Float4(As[load_stage_idx][tile_idx_bk + 1]
                              [Thread_Size_Y * ty + tile_idx_rn]);
         }
-
+#pragma unroll
         for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X;
              tile_idx_rm += loadN) {
           Fetch_Float4(reg_B[(tile_idx_bk + 1) % 2][tile_idx_rm]) =
@@ -144,8 +156,10 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
         }
       }
 
-      // compute this tile rn , rm
+// compute this tile rn , rm
+#pragma unroll
       for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y; ++tile_idx_rn) {
+#pragma unroll
         for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X; ++tile_idx_rm) {
           accum[tile_idx_rn][tile_idx_rm] +=
               reg_A[tile_idx_bk % 2][tile_idx_rn] *
@@ -156,19 +170,23 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
 
     // load next tile A and B from register tmp to shared memory
     if (tile_idx_k + Block_Size_K < K) {
+#pragma unroll
       for (int tile_idx_bn = 0; tile_idx_bn < Block_Size_N;
            tile_idx_bn += A_Tile_Row_Stride) {
-        int index = tile_idx_bn / A_Tile_Row_Stride;
+        int index = tile_idx_bn / A_Tile_Row_Stride * loadN;
+#pragma unroll
         for (int load_N = 0; load_N < loadN; ++load_N) {
           As[write_stage_idx][A_Tile_Col + load_N][A_Tile_Row + tile_idx_bn] =
               load_A_reg[index + load_N];
         }
       }
 
-      // load B from global to shared
+// load B from global to shared
+#pragma unroll
       for (int tile_idx_bk = 0; tile_idx_bk < Block_Size_K;
            tile_idx_bk += B_Tile_Row_Stride) {
         int index = tile_idx_bk / B_Tile_Row_Stride * loadN;
+#pragma unroll
         for (int load_N = 0; load_N < loadN; ++load_N) {
           Bs[write_stage_idx][B_Tile_Row + tile_idx_bk][B_Tile_Col + load_N] =
               load_B_reg[index + load_N];
@@ -180,8 +198,10 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
     write_stage_idx ^= 1;
   }
 
-  // store back to C
+// store back to C
+#pragma unroll
   for (int tile_idx_rn = 0; tile_idx_rn < Thread_Size_Y; ++tile_idx_rn) {
+#pragma unroll
     for (int tile_idx_rm = 0; tile_idx_rm < Thread_Size_X;
          tile_idx_rm += loadN) {
       Fetch_Float4(
@@ -198,7 +218,6 @@ int main(int argc, char **argv) {
     exit(0);
   }
   size_t N = atoi(argv[1]), K = atoi(argv[2]), M = atoi(argv[3]);
-
   float *h_a = new float[N * K], *h_b = new float[K * M],
         *h_c = new float[N * M], *h_c1 = new float[N * M];
 

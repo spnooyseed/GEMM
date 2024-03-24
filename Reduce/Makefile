@@ -20,10 +20,12 @@ $(BUILD_DIR)/%: %.cu
 	$(NVCC) -o $@ $<
 
 # 清理目标目录
+# PROFILE_DIR = profile
 clean:
 	rm -rf $(BUILD_DIR)
+	# rm -rf $(PROFILE_DIR)
 run:
 	$(foreach exec, $(TARGETS), $(exec);)
-
+	# $(foreach exec, $(TARGETS), ncu -o $(PROFILE_DIR)/$(notdir  $(exec)) -f --set full --graph-profiling=graph $(exec);)
 # 伪目标，表示依赖文件
 .PHONY: all clean run

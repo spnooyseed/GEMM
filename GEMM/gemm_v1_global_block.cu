@@ -47,6 +47,7 @@ __global__ void Gemm(float *__restrict__ A, float *__restrict__ B,
     As[ty][tx] = A[Offset(row, tx + i, K)];
     Bs[ty][tx] = B[Offset(ty + i, col, M)];
     __syncthreads();
+#pragma unroll
     for (int j = 0; j < Block_Size_K; ++j) {
 
       tmp += As[ty][j] * Bs[j][tx];
